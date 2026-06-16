@@ -1,0 +1,27 @@
+# --- Reference material: kept locally, never pushed ---
+book/
+
+# --- Build outputs ---
+build/
+*.o
+*.obj
+*.a
+*.so
+
+# --- Benchmark results / generated artifacts ---
+results/
+
+# --- LaTeX aux (safety net; book/ already ignored) ---
+*.aux
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# --- OS / editor cruft ---
+.DS_Store
+*.swp
+.vscode/
+.idea/
