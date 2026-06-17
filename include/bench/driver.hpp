@@ -14,6 +14,7 @@
 #include "bench/gemm_matrix.hpp"
 #include "bench/gemm_tiled.hpp"
 #include "bench/gpu_types.hpp"
+#include "bench/kernels_spinlock.hpp"
 #include "bench/kernels_validate.hpp"
 #include "bench/metrics.hpp"
 #include "bench/reference.hpp"
@@ -171,6 +172,78 @@ inline int run_matrix(const Args& args) {
 }
 #endif
 
+// ----- Spinlock microbenchmark: H100 (ITS, deadlock-free) vs MI300A (lock-step) -----
+inline const char* SPIN_CSV_HEADER =
+    "backend,device,variant,map,threads,locks,work,critsize,maxspin,"
+    "kernel_ms,mops_per_s,correct,abandoned";
+
+inline int run_spinlock(const Args& a) {
+  const int variant = parse_variant(a.variant);
+  const int map = parse_map(a.map);
+  const int W = a.work;
+  // Round total threads up to a multiple of the block size so every warp/wavefront is
+  // full. That makes the leader counting model (adds warpSize per acquired lock) exact
+  // on both 32-lane (NVIDIA) and 64-lane (AMD) hardware: (T/warpSize)*warpSize*W = T*W.
+  const int tpb = 256;
+  long long Teff = ((a.threads + tpb - 1) / tpb) * tpb;
+  if (Teff < tpb) Teff = tpb;
+  long long L = a.locks; if (L < 1) L = 1;
+
+  Buffer<int> lock((std::size_t)L);
+  Buffer<u64> counter((std::size_t)L);
+  Buffer<u64> abandoned(1), sink(1);
+
+  auto reset = [&]() {
+    for (long long i = 0; i < L; ++i) { lock.host()[i] = 0; counter.host()[i] = 0ULL; }
+    abandoned.host()[0] = 0ULL; sink.host()[0] = 0ULL;
+    lock.to_device(); counter.to_device(); abandoned.to_device(); sink.to_device();
+  };
+
+  reset();
+  for (int w = 0; w < a.warmup; ++w)
+    launch_spinlock(variant, lock.device(), counter.device(), abandoned.device(),
+                    sink.device(), Teff, W, L, map, a.critsize, a.maxspin);
+  device_sync();
+
+  std::vector<double> kt;
+  for (int r = 0; r < a.reps; ++r) {
+    reset();
+    DeviceTimer t; t.start();
+    launch_spinlock(variant, lock.device(), counter.device(), abandoned.device(),
+                    sink.device(), Teff, W, L, map, a.critsize, a.maxspin);
+    kt.push_back(t.stop_ms());
+  }
+  double kernel_ms = median(kt);
+
+  counter.to_host(); abandoned.to_host();
+  u64 sum = 0; for (long long i = 0; i < L; ++i) sum += counter.host()[i];
+  u64 expected = (u64)Teff * (u64)W;
+  u64 aband = abandoned.host()[0];
+  // "correct" = every critical section that should have run did run exactly once and
+  // nobody bailed. On MI300A the naive/perwarp variant can livelock-bail, so abandoned>0
+  // (or sum<expected) is itself the headline result, not a harness bug.
+  bool correct = (sum == expected) && (aband == 0ULL);
+
+  double total_ops = (double)Teff * (double)W;
+  double mops = (kernel_ms > 0.0) ? total_ops / (kernel_ms / 1e3) / 1e6 : 0.0;
+
+  std::printf("[spinlock %s/%s] T=%lld L=%lld W=%d crit=%d  kernel %.4f ms  %.1f Mops/s  "
+              "%s  abandoned=%llu  (sum=%llu expected=%llu)\n",
+              a.variant.c_str(), a.map.c_str(), Teff, L, W, a.critsize, kernel_ms, mops,
+              correct ? "[OK]" : "[INCOMPLETE]", (unsigned long long)aband,
+              (unsigned long long)sum, (unsigned long long)expected);
+
+  std::ostringstream row;
+  row << BENCH_BACKEND_NAME << "," << device_name() << "," << a.variant << "," << a.map << ","
+      << Teff << "," << L << "," << W << "," << a.critsize << "," << a.maxspin << ","
+      << kernel_ms << "," << mops << "," << (correct ? "yes" : "no") << ","
+      << (unsigned long long)aband;
+  append_csv(a.csv, SPIN_CSV_HEADER, row.str());
+  // Abandonment is a measured outcome, not a failure: always exit 0 so a sweep can
+  // record the deadlock-bail row instead of aborting the run.
+  return 0;
+}
+
 inline int run(int argc, char** argv) {
   Args args = parse_args(argc, argv);
   std::printf("backend=%s  device=%s\n", BENCH_BACKEND_NAME, device_name());
@@ -192,7 +265,9 @@ inline int run(int argc, char** argv) {
     return 2;
 #endif
   }
-  std::fprintf(stderr, "unknown --kernel '%s' (have: vadd, tiled, matrix)\n", args.kernel.c_str());
+  if (args.kernel == "spinlock") return run_spinlock(args);
+  std::fprintf(stderr, "unknown --kernel '%s' (have: vadd, tiled, matrix, spinlock)\n",
+               args.kernel.c_str());
   return 2;
 }
 

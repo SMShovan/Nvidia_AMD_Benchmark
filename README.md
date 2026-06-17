@@ -18,6 +18,9 @@ AMD wavefront = 64).
   `__builtin_amdgcn_mfma_f32_16x16x16f16` (layout per the ROCm/salykova reference).
   Requires M,N,K multiples of 16. **Validate on hardware with `--check`** (esp. the
   MFMA path; it could not be run in the dev sandbox).
+- **Spinlock study (done):** `--kernel spinlock` — a separate microbenchmark for
+  GNND's spinlock idea, measuring how a busy-wait lock behaves on NVIDIA (Volta+
+  Independent Thread Scheduling) vs AMD CDNA (lock-step wavefronts). See below.
 - Phase 3: sweeps + profiling.  Phase 4: analysis.  Phase 5: the explainer book.
 
 All GEMM kernels verify against a CPU reference (sampled for large sizes).
@@ -66,10 +69,55 @@ flux run -N1 -g1 ./build/gemm_bench --kernel matrix             --M 4096 --N 409
 Sweep:  `BIN=build/gemm_bench DTYPES="fp32 fp16" scripts/run_sweep.sh`
 (use `DTYPES=fp32` for the CPU backend).
 
+## Spinlock microbenchmark
+
+GNND protects each neighbor list with a busy-wait **spinlock**. The interesting
+question is architectural: an intra-warp spinlock can **deadlock/livelock on AMD
+CDNA** (lanes run lock-step, so a masked-off lock holder can never release while its
+peers spin) but **completes on NVIDIA Volta+** (per-thread program counters guarantee
+forward progress). This kernel makes that difference measurable, safely.
+
+Three lock variants, all doing the same work (`W` critical sections per thread, each
+incrementing a shared counter):
+
+- `naive` — every lane takes a per-index `atomicCAS` spinlock. With `--map perwarp`
+  (a whole warp/wavefront contends for one lock) this is the deadlock-prone case.
+- `leader` — one lane per warp/wavefront acquires on behalf of the group
+  (warp-aggregated). Deadlock-safe on both architectures.
+- `atomic` — lock-free `atomicAdd` (no lock at all): the SOLANET-style ceiling.
+
+Safety: a **bounded spin** (`--maxspin`) guarantees the kernel always terminates. A
+lane that gives up bumps an `abandoned` counter instead of hanging the GPU, so a
+livelock shows up as a finished run with `correct=no` / `abandoned>0` rather than a
+wedged device. Correctness check: total counted increments must equal `threads*work`.
+
+```bash
+# headline + contention sweeps -> one CSV
+BIN=build/gemm_bench CSV=results/spin_h100.csv   scripts/run_spinlock.sh   # on H100
+BIN=build/gemm_bench CSV=results/spin_mi300a.csv scripts/run_spinlock.sh   # on MI300A
+#   (MI300A: prefix with `flux run -N1 -g1` and `export HSA_XNACK=1`)
+
+# one-off
+./build/gemm_bench --kernel spinlock --variant naive --map perwarp \
+    --threads 262144 --locks 1024 --work 64 --reps 20 --csv results/spin.csv
+
+# tables + plots (throughput vs contention, headline bars, livelock signal)
+python3 scripts/analyze_spinlock.py results/spin_*.csv --out results
+```
+
+The expected story: `naive`+`perwarp` completes on H100 but **bails on MI300A**
+(`abandoned>0`); `leader` fixes it on both; `atomic` is the fastest everywhere. The
+contention sweep (throughput vs `--locks`) compares the two vendors' atomics from
+maximum contention (1 lock) to none.
+
 ## CLI
 
-`--kernel vadd|tiled|matrix`, `--dtype fp32|fp16`, `--M --N --K`,
-`--reps --warmup`, `--check`, `--csv path`, `--peak gflops` (optional).
+`--kernel vadd|tiled|matrix|spinlock`
+
+- GEMM: `--dtype fp32|fp16`, `--M --N --K`, `--peak gflops` (optional).
+- spinlock: `--variant naive|leader|atomic`, `--map striped|perwarp|perthread`,
+  `--threads T`, `--locks L`, `--work W`, `--critsize C`, `--maxspin S`.
+- common: `--reps --warmup`, `--check`, `--csv path`.
 
 ## Tuning the tiled kernel
 
