@@ -25,3 +25,7 @@ results/
 *.swp
 .vscode/
 .idea/
+
+# --- Python cache ---
+__pycache__/
+*.pyc

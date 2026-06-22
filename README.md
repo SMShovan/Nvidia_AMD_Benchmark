@@ -110,6 +110,51 @@ The expected story: `naive`+`perwarp` completes on H100 but **bails on MI300A**
 contention sweep (throughput vs `--locks`) compares the two vendors' atomics from
 maximum contention (1 lock) to none.
 
+## Full experiment study (one runner + seaborn plots)
+
+`scripts/run_experiments.sh` runs the whole study on one machine, repeating every
+configuration **M times** so the plots can use an interquartile-trimmed mean and std
+(keep the 25th–75th percentile, drop the extremes). Raw results go to a **separate
+tree**, `results/experiments/`, so they never mix with the ad-hoc `results/*.csv`.
+
+```bash
+scripts/run_experiments.sh <small|large> <h100|mi300a|cpu>
+#   small = quick smoke (tiny sizes, few reps); large = the real run (M=15)
+```
+
+Covers correctness (`--check` gate), GEMM tiled kernel-only and end-to-end time,
+matrix-core time, the regular-vs-matrix speedup, and the spinlock headline + contention
+sweep. Output layout:
+
+```
+results/experiments/raw_csv/    <phase>_gemm_<gpu>.csv, <phase>_spin_<gpu>.csv  (M rows/config)
+results/experiments/raw_text/   <phase>_<gpu>_console.txt  (full console log)
+```
+
+Typical flow (run once per cluster, plot once locally):
+
+```bash
+# Matrix (H100), inside an salloc shell:
+cmake -S . -B build -DBACKEND=CUDA -DCMAKE_CUDA_ARCHITECTURES=90 -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+scripts/run_experiments.sh small h100   # smoke first
+scripts/run_experiments.sh large h100
+
+# Tuolumne (MI300A): build with HIP (see above), then:
+scripts/run_experiments.sh small mi300a   # auto: HSA_XNACK=1 + flux run -N1 -g1
+scripts/run_experiments.sh large mi300a
+
+# download the results/experiments/ tree to your own machine, then:
+pip install --user pandas seaborn matplotlib
+python3 scripts/plot_experiments.py results/experiments --out results/experiments
+```
+
+`plot_experiments.py` writes one figure per experiment (kernel time, transfer
+overhead, matrix-core time, regular-vs-matrix speedup, the NVIDIA/AMD gap ratio vs
+size, and the two spinlock figures) plus `gemm_summary.csv` / `spin_summary.csv` with
+the trimmed mean/std per configuration. The GEMM x-axis is matrix size, so a widening
+gap is visible directly. Note: on MI300A the `naive`+`perwarp` headline case spins to
+`--maxspin` before bailing, so that row runs slower than the others (expected).
+
 ## CLI
 
 `--kernel vadd|tiled|matrix|spinlock`
