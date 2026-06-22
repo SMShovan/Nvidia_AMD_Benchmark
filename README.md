@@ -118,8 +118,11 @@ configuration **M times** so the plots can use an interquartile-trimmed mean and
 tree**, `results/experiments/`, so they never mix with the ad-hoc `results/*.csv`.
 
 ```bash
-scripts/run_experiments.sh <small|large> <h100|mi300a|cpu>
-#   small = quick smoke (tiny sizes, few reps); large = the real run (M=15)
+scripts/run_experiments.sh <small|large|huge> <h100|mi300a|cpu> [all|gemm|spin]
+#   small = quick smoke (tiny sizes);  large = main run (1024..8192, M=15)
+#   huge  = big matrices (12288..24576, fewer repeats; GEMM only by default)
+#   3rd arg picks what to run (default all; huge defaults to gemm).
+#     e.g. `... large mi300a spin` redoes ONLY the spinlock, keeping the GEMM CSV.
 ```
 
 Covers correctness (`--check` gate), GEMM tiled kernel-only and end-to-end time,
@@ -143,17 +146,22 @@ scripts/run_experiments.sh large h100
 scripts/run_experiments.sh small mi300a   # auto: HSA_XNACK=1 + flux run -N1 -g1
 scripts/run_experiments.sh large mi300a
 
+# optional: extend the GEMM curve to big matrices (GEMM only, ~20-30 min/GPU):
+scripts/run_experiments.sh huge h100
+scripts/run_experiments.sh huge mi300a
+
 # download the results/experiments/ tree to your own machine, then:
 pip install --user pandas seaborn matplotlib
-python3 scripts/plot_experiments.py results/experiments --out results/experiments
+python3 scripts/plot_experiments.py results/experiments/raw_csv/*.csv --out results/experiments
 ```
 
 `plot_experiments.py` writes one figure per experiment (kernel time, transfer
 overhead, matrix-core time, regular-vs-matrix speedup, the NVIDIA/AMD gap ratio vs
 size, and the two spinlock figures) plus `gemm_summary.csv` / `spin_summary.csv` with
 the trimmed mean/std per configuration. The GEMM x-axis is matrix size, so a widening
-gap is visible directly. Note: on MI300A the `naive`+`perwarp` headline case spins to
-`--maxspin` before bailing, so that row runs slower than the others (expected).
+gap is visible directly. The spinlock headline gives each warp/wavefront its own lock
+(`head_locks` >= threads/32) so NVIDIA completes cleanly and AMD bails fast; livelock
+is flagged in the figure by the fraction of work abandoned, not just any abandonment.
 
 ## CLI
 

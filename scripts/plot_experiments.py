@@ -268,19 +268,28 @@ def spin_plots(s, out):
     s = s.copy()
     s["locks"] = s["locks"].astype(int)
     a = agg(s, ["vendor", "variant", "map", "locks"], ["mops_per_s", "kernel_ms"])
-    # carry a "bailed" flag (any abandoned>0 or correct==no in the group)
-    flag = (s.assign(bad=(pd.to_numeric(s["abandoned"], errors="coerce").fillna(0) > 0) |
-                         (s.get("correct", "yes").astype(str) == "no"))
-              .groupby(["vendor", "variant", "map", "locks"])["bad"].any().reset_index())
-    a = a.merge(flag, on=["vendor", "variant", "map", "locks"], how="left")
+    # Livelock signal = FRACTION of critical sections abandoned, not just "any".
+    # A few cap-outs of millions (H100 under heavy contention) is not a livelock; a
+    # near-total bail (MI300A naive+perwarp) is. Flag only when the fraction is large,
+    # so the two are not labeled the same.
+    sx = s.copy()
+    sx["abandoned"] = pd.to_numeric(sx["abandoned"], errors="coerce").fillna(0)
+    sx["expected"] = (pd.to_numeric(sx["threads"], errors="coerce")
+                      * pd.to_numeric(sx["work"], errors="coerce"))
+    sx["frac"] = sx["abandoned"] / sx["expected"].replace(0, np.nan)
+    frac = sx.groupby(["vendor", "variant", "map", "locks"])["frac"].mean().reset_index()
+    a = a.merge(frac, on=["vendor", "variant", "map", "locks"], how="left")
+    a["frac"] = a["frac"].fillna(0.0)
+    a["bad"] = a["frac"] > 0.05            # >5% abandoned = livelock
     a.to_csv(os.path.join(out, "spin_summary.csv"), index=False)
     print("  wrote", os.path.join(out, "spin_summary.csv"))
 
-    bailed = a[a["bad"] == True]
+    bailed = a[a["bad"]]
     if not bailed.empty:
-        print("  LIVELOCK / INCOMPLETE (the headline):")
+        print("  LIVELOCK -- substantial abandonment (the headline):")
         for _, r in bailed.iterrows():
-            print(f"    {r['vendor']:14s} {r['variant']:6s}/{r['map']:8s} locks={int(r['locks'])}")
+            print(f"    {r['vendor']:14s} {r['variant']:6s}/{r['map']:8s} "
+                  f"locks={int(r['locks'])}  abandoned={r['frac']*100:.1f}%")
 
     # exp6 headline: perwarp, bars by variant x vendor, bail annotated
     head = a[a["map"] == "perwarp"]
@@ -295,8 +304,10 @@ def spin_plots(s, out):
             for bar, var in zip(cont, order):
                 row = head[(head["vendor"] == vend) & (head["variant"] == var)]
                 if not row.empty and bool(row["bad"].iloc[0]):
-                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(), "bailed",
-                            ha="center", va="bottom", color="crimson", fontsize=10, rotation=0)
+                    pct = float(row["frac"].iloc[0]) * 100
+                    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height(),
+                            f"bailed\n{pct:.0f}%", ha="center", va="bottom",
+                            color="crimson", fontsize=9)
         ax.set_xlabel("lock variant (map = perwarp)"); ax.set_ylabel("throughput (Mops/s)")
         ax.set_title("Spinlock headline: same code, one bails on AMD")
         ax.legend(fontsize=11, title=None)
