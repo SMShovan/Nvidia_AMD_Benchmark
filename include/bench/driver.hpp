@@ -170,6 +170,46 @@ inline int run_matrix(const Args& args) {
   write_row("matrix", "fp16", args, kernel_ms, e2e_ms, gflops, 0.0, verified, max_rel);
   return (args.check && std::string(verified) == "no") ? 1 : 0;
 }
+
+// ----- Optimized matrix-unit GEMM (shared/LDS staged + warp/wavefront tiled) -----
+inline int run_matrix_opt(const Args& args) {
+  const int M = (int)args.M, N = (int)args.N, K = (int)args.K;
+  if (M % BENCH_MM_BM || N % BENCH_MM_BN || K % BENCH_MM_BK) {
+    std::fprintf(stderr, "matrix_opt requires M%%%d==0, N%%%d==0, K%%%d==0\n",
+                 BENCH_MM_BM, BENCH_MM_BN, BENCH_MM_BK);
+    return 2;
+  }
+  const std::size_t aN = (std::size_t)M * K, bN = (std::size_t)K * N, cN = (std::size_t)M * N;
+  std::vector<float> mA(aN), mB(bN); fill_master(mA, mB);
+  Buffer<half_t> dA(aN), dB(bN);
+  Buffer<float>  dC(cN);
+  for (std::size_t i = 0; i < aN; ++i) set_in(dA.host()[i], mA[i]);
+  for (std::size_t i = 0; i < bN; ++i) set_in(dB.host()[i], mB[i]);
+  dA.to_device(); dB.to_device();
+  for (int w = 0; w < args.warmup; ++w) launch_gemm_matrix_opt(dA.device(), dB.device(), dC.device(), M, N, K);
+  device_sync();
+  std::vector<double> kt;
+  for (int r = 0; r < args.reps; ++r) { DeviceTimer t; t.start();
+    launch_gemm_matrix_opt(dA.device(), dB.device(), dC.device(), M, N, K); kt.push_back(t.stop_ms()); }
+  double kernel_ms = median(kt);
+  std::vector<double> et;
+  for (int r = 0; r < args.reps; ++r) { CpuTimer t; t.start();
+    dA.to_device(); dB.to_device(); launch_gemm_matrix_opt(dA.device(), dB.device(), dC.device(), M, N, K);
+    device_sync(); dC.to_host(); et.push_back(t.stop_ms()); }
+  double e2e_ms = median(et);
+  dC.to_host();
+  const char* verified = "skip"; double max_rel = 0.0;
+  if (args.check) {
+    bool ok = verify_gemm([&](std::size_t idx){ return (double)dC.host()[idx]; },
+                          mA, mB, M, N, K, 5e-2, max_rel);
+    verified = ok ? "yes" : "no";
+  }
+  double gflops = 2.0 * (double)M * (double)N * (double)K / (kernel_ms / 1e3) / 1e9;
+  std::printf("[matrix_opt fp16] %dx%dx%d  kernel %.4f ms  e2e %.4f ms  %.1f GFLOP/s  %s\n",
+              M, N, K, kernel_ms, e2e_ms, gflops, args.check ? verified : "");
+  write_row("matrix_opt", "fp16", args, kernel_ms, e2e_ms, gflops, 0.0, verified, max_rel);
+  return (args.check && std::string(verified) == "no") ? 1 : 0;
+}
 #endif
 
 // ----- Spinlock microbenchmark: H100 (ITS, deadlock-free) vs MI300A (lock-step) -----
@@ -265,8 +305,16 @@ inline int run(int argc, char** argv) {
     return 2;
 #endif
   }
+  if (args.kernel == "matrix_opt") {
+#if BENCH_DEVICE
+    return run_matrix_opt(args);
+#else
+    std::fprintf(stderr, "matrix_opt kernel requires a GPU backend (CUDA/HIP)\n");
+    return 2;
+#endif
+  }
   if (args.kernel == "spinlock") return run_spinlock(args);
-  std::fprintf(stderr, "unknown --kernel '%s' (have: vadd, tiled, matrix, spinlock)\n",
+  std::fprintf(stderr, "unknown --kernel '%s' (have: vadd, tiled, matrix, matrix_opt, spinlock)\n",
                args.kernel.c_str());
   return 2;
 }

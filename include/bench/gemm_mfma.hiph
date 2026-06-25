@@ -50,4 +50,102 @@ inline void launch_gemm_matrix(const half_t* A, const half_t* B, float* C,
                                           reinterpret_cast<const fp16_t*>(B), C, M, N, K);
   check_launch();
 }
+
+// ===================================================================
+//  Optimized MFMA: LDS staged + wavefront-tiled, bank-conflict padded.
+//  Same optimization level as the regular-core tiled kernel. Block computes
+//  BM x BN; each wavefront owns a WM x WN sub-tile made of (WM/16)x(WN/16)
+//  MFMA 16x16x16 results accumulated in registers. The per-lane layout is
+//  identical to the naive kernel above, just sourced from LDS:
+//    r = lane%16, g = lane/16 ;  A[.. r][.. 4g+{0..3}] ; B[.. 4g+i][.. r]
+//  Requires M,N,K multiples of BM,BN,BK. Tile sizes overridable.
+// ===================================================================
+#ifndef BENCH_MM_BM
+#define BENCH_MM_BM 64
+#endif
+#ifndef BENCH_MM_BN
+#define BENCH_MM_BN 64
+#endif
+#ifndef BENCH_MM_BK
+#define BENCH_MM_BK 32
+#endif
+#ifndef BENCH_MM_WM
+#define BENCH_MM_WM 32
+#endif
+#ifndef BENCH_MM_WN
+#define BENCH_MM_WN 32
+#endif
+#ifndef BENCH_MM_PAD
+#define BENCH_MM_PAD 8
+#endif
+
+__global__ void gemm_mfma_opt_kernel(const fp16_t* A, const fp16_t* B, float* C,
+                                     int M, int N, int K) {
+  constexpr int BM = BENCH_MM_BM, BN = BENCH_MM_BN, BK = BENCH_MM_BK;
+  constexpr int WM = BENCH_MM_WM, WN = BENCH_MM_WN;
+  constexpr int WMITER = WM / 16, WNITER = WN / 16;
+  constexpr int ldA = BK + BENCH_MM_PAD, ldB = BN + BENCH_MM_PAD;
+  __shared__ fp16_t As[BM * ldA];   // A block tile [BM][ldA]
+  __shared__ fp16_t Bs[BK * ldB];   // B block tile [BK][ldB]
+
+  const int warpsN  = BN / WN;
+  const int tid     = threadIdx.x;
+  const int nThr    = blockDim.x;
+  const int wave    = tid / 64;
+  const int lane    = tid % 64;
+  const int warpRow = wave / warpsN;
+  const int warpCol = wave % warpsN;
+  const int blockRow = blockIdx.y, blockCol = blockIdx.x;
+
+  const int r = lane % 16;   // row within a 16x16 tile
+  const int g = lane / 16;   // K-group 0..3
+
+  fp32x4_t acc[WMITER][WNITER];
+  for (int i = 0; i < WMITER; ++i)
+    for (int j = 0; j < WNITER; ++j) acc[i][j] = fp32x4_t{};
+
+  for (int k0 = 0; k0 < K; k0 += BK) {
+    for (int idx = tid; idx < BM * BK; idx += nThr) {     // stage A tile
+      int rr = idx / BK, cc = idx % BK;
+      As[rr * ldA + cc] = A[(std::size_t)(blockRow * BM + rr) * K + (k0 + cc)];
+    }
+    for (int idx = tid; idx < BK * BN; idx += nThr) {     // stage B tile
+      int rr = idx / BN, cc = idx % BN;
+      Bs[rr * ldB + cc] = B[(std::size_t)(k0 + rr) * N + (blockCol * BN + cc)];
+    }
+    __syncthreads();
+    for (int ks = 0; ks < BK; ks += 16) {
+      fp16x4_t a_reg[WMITER];
+      fp16x4_t b_reg[WNITER];
+      for (int i = 0; i < WMITER; ++i)          // 4 contiguous halfs along K
+        a_reg[i] = *reinterpret_cast<const fp16x4_t*>(
+            &As[(warpRow * WM + i * 16 + r) * ldA + (ks + 4 * g)]);
+      for (int j = 0; j < WNITER; ++j)          // 4 halfs down a K column
+        for (int t = 0; t < 4; ++t)
+          b_reg[j][t] = Bs[(ks + 4 * g + t) * ldB + (warpCol * WN + j * 16 + r)];
+      for (int i = 0; i < WMITER; ++i)
+        for (int j = 0; j < WNITER; ++j)
+          acc[i][j] = __builtin_amdgcn_mfma_f32_16x16x16f16(a_reg[i], b_reg[j], acc[i][j], 0, 0, 0);
+    }
+    __syncthreads();
+  }
+  for (int i = 0; i < WMITER; ++i)
+    for (int j = 0; j < WNITER; ++j) {
+      int row = blockRow * BM + warpRow * WM + i * 16;
+      int col = blockCol * BN + warpCol * WN + j * 16;
+      for (int t = 0; t < 4; ++t)
+        C[(std::size_t)(row + 4 * g + t) * N + (col + r)] = acc[i][j][t];
+    }
+}
+
+inline void launch_gemm_matrix_opt(const half_t* A, const half_t* B, float* C,
+                                   int M, int N, int K) {
+  constexpr int BM = BENCH_MM_BM, BN = BENCH_MM_BN, WM = BENCH_MM_WM, WN = BENCH_MM_WN;
+  const int waves = (BM / WM) * (BN / WN);
+  dim3 block(waves * 64);
+  dim3 grid(N / BN, M / BM);
+  gemm_mfma_opt_kernel<<<grid, block>>>(reinterpret_cast<const fp16_t*>(A),
+                                        reinterpret_cast<const fp16_t*>(B), C, M, N, K);
+  check_launch();
+}
 }  // namespace bench

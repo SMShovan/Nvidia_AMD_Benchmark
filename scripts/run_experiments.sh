@@ -111,6 +111,7 @@ if [ "$RUN_GEMM" = 1 ]; then
   if [ "$GPU" != "cpu" ]; then
     chk --kernel tiled --dtype fp16 --M 512 --N 512 --K 512
     chk --kernel matrix             --M 512 --N 512 --K 512
+    chk --kernel matrix_opt         --M 512 --N 512 --K 512
   fi
 fi
 [ "$RUN_SPIN" = 1 ] && run --kernel spinlock --variant atomic --map striped --threads 4096 --locks 64 --work 8
@@ -127,10 +128,17 @@ if [ "$RUN_GEMM" = 1 ]; then
     done; done
   done
   if [ "$GPU" != "cpu" ]; then
-    say "=== GEMM matrix-core sweep -> $GEMM_CSV  (M=$M) ==="
+    say "=== GEMM matrix-core sweep (naive) -> $GEMM_CSV  (M=$M) ==="
     for ((m=1; m<=M; m++)); do
       for S in $SIZES; do
         run --kernel matrix --M "$S" --N "$S" --K "$S" \
+            --reps "$REPS" --warmup "$WARMUP" --csv "$GEMM_CSV"
+      done
+    done
+    say "=== GEMM matrix-core sweep (optimized) -> $GEMM_CSV  (M=$M) ==="
+    for ((m=1; m<=M; m++)); do
+      for S in $SIZES; do
+        run --kernel matrix_opt --M "$S" --N "$S" --K "$S" \
             --reps "$REPS" --warmup "$WARMUP" --csv "$GEMM_CSV"
       done
     done

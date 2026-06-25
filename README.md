@@ -16,8 +16,15 @@ AMD wavefront = 64).
 - **Phase 2 (done):** matrix-unit **GEMM** (`--kernel matrix`, fp16-in / fp32-out,
   16x16x16): NVIDIA Tensor Cores via `nvcuda::wmma`, AMD Matrix Cores via
   `__builtin_amdgcn_mfma_f32_16x16x16f16` (layout per the ROCm/salykova reference).
-  Requires M,N,K multiples of 16. **Validate on hardware with `--check`** (esp. the
-  MFMA path; it could not be run in the dev sandbox).
+  This is the **naive** matrix kernel (no staging) and is kept as a baseline.
+  Requires M,N,K multiples of 16. **Validate on hardware with `--check`**.
+- **Optimized matrix GEMM (`--kernel matrix_opt`):** the matrix-core kernel brought to
+  the *same* optimization level as the tiled kernel for a fair comparison: block tile
+  (64x64, K-step 32) staged in shared memory / LDS, 32x32 warp/wavefront register tile
+  (a 2x2 grid of 16x16 fragments), and **bank-conflict padding** of the staged tiles.
+  Tile sizes overridable (`-DBENCH_MM_BM=..` etc.); requires M,N,K multiples of the tile
+  (64/64/32). **Validate on hardware with `--check`** (written to mirror the naive
+  per-lane layout; not compilable in the dev sandbox).
 - **Spinlock study (done):** `--kernel spinlock` — a separate microbenchmark for
   GNND's spinlock idea, measuring how a busy-wait lock behaves on NVIDIA (Volta+
   Independent Thread Scheduling) vs AMD CDNA (lock-step wavefronts). See below.
@@ -165,7 +172,7 @@ is flagged in the figure by the fraction of work abandoned, not just any abandon
 
 ## CLI
 
-`--kernel vadd|tiled|matrix|spinlock`
+`--kernel vadd|tiled|matrix|matrix_opt|spinlock`
 
 - GEMM: `--dtype fp32|fp16`, `--M --N --K`, `--peak gflops` (optional).
 - spinlock: `--variant naive|leader|atomic`, `--map striped|perwarp|perthread`,
