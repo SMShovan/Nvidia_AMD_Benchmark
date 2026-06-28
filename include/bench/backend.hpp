@@ -3,6 +3,8 @@
 #pragma once
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cstddef>
 
 #if defined(BENCH_BACKEND_CUDA)
   #include <cuda_runtime.h>
@@ -15,6 +17,7 @@
   #define gpuMalloc              cudaMalloc
   #define gpuFree                cudaFree
   #define gpuMemcpy              cudaMemcpy
+  #define gpuMemset              cudaMemset
   #define gpuMemcpyHostToDevice  cudaMemcpyHostToDevice
   #define gpuMemcpyDeviceToHost  cudaMemcpyDeviceToHost
   #define gpuDeviceSynchronize   cudaDeviceSynchronize
@@ -38,6 +41,7 @@
   #define gpuMalloc              hipMalloc
   #define gpuFree                hipFree
   #define gpuMemcpy              hipMemcpy
+  #define gpuMemset              hipMemset
   #define gpuMemcpyHostToDevice  hipMemcpyHostToDevice
   #define gpuMemcpyDeviceToHost  hipMemcpyDeviceToHost
   #define gpuDeviceSynchronize   hipDeviceSynchronize
@@ -75,6 +79,17 @@ namespace bench {
 inline void device_sync() {
 #if BENCH_DEVICE
   GPU_CHECK(gpuDeviceSynchronize());
+#endif
+}
+
+// Zero/set device memory in one call: a real GPU memset on CUDA/HIP, std::memset on
+// CPU. Lets the spinlock reset huge (multi-GB) lock/counter arrays cheaply instead of
+// looping on the host.
+inline void device_memset(void* p, int v, std::size_t bytes) {
+#if BENCH_DEVICE
+  GPU_CHECK(gpuMemset(p, v, bytes));
+#else
+  std::memset(p, v, bytes);
 #endif
 }
 

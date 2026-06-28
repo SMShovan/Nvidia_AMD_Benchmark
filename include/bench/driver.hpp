@@ -233,10 +233,14 @@ inline int run_spinlock(const Args& a) {
   Buffer<u64> counter((std::size_t)L);
   Buffer<u64> abandoned(1), sink(1);
 
+  // Zero the device buffers directly (fast even when L is hundreds of millions, i.e.
+  // multi-GB arrays): a host loop here would dominate the run.
   auto reset = [&]() {
-    for (long long i = 0; i < L; ++i) { lock.host()[i] = 0; counter.host()[i] = 0ULL; }
-    abandoned.host()[0] = 0ULL; sink.host()[0] = 0ULL;
-    lock.to_device(); counter.to_device(); abandoned.to_device(); sink.to_device();
+    device_memset(counter.device(), 0, (std::size_t)L * sizeof(u64));
+    device_memset(lock.device(),    0, (std::size_t)L * sizeof(int));
+    device_memset(abandoned.device(), 0, sizeof(u64));
+    device_memset(sink.device(),      0, sizeof(u64));
+    device_sync();
   };
 
   reset();
