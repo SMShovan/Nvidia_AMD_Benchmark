@@ -26,6 +26,12 @@ struct Args {
   int work = 64;                  // ops per thread W
   int critsize = 0;               // dummy work inside the critical section
   int maxspin = 100000;           // bounded spin cap (safety; detects deadlock)
+  // --- spinlock node mode (GNND-scale): when nodes>0, L is derived as nodes*segs and
+  //     each update targets a (node,segment) lock, scattered across the whole array, with
+  //     `contention` wavefronts concurrently hitting the same lock. ---
+  long long nodes = 0;            // graph nodes N (0 => flat --locks mode)
+  int segs = 4;                   // lock segments per node S (k/32 in GNND, e.g. 4)
+  int contention = 1;             // wavefronts (warps) sharing one lock G (>=1)
 };
 
 inline void print_usage(const char* prog) {
@@ -34,6 +40,8 @@ inline void print_usage(const char* prog) {
       "  GEMM:     --M --N --K --dtype fp32|fp16|bf16\n"
       "  spinlock: --variant naive|leader|atomic  --map striped|perwarp|perthread\n"
       "            --threads T --locks L --work W --critsize C --maxspin S\n"
+      "  spinlock node mode (GNND-scale): --nodes N --segs S --contention G\n"
+      "            (L = N*S; G wavefronts share each lock; --locks ignored when --nodes>0)\n"
       "  common:   --reps --warmup --check --csv path --peak gflops\n", prog);
 }
 
@@ -59,6 +67,9 @@ inline Args parse_args(int argc, char** argv) {
     else if (!std::strcmp(s,"--work"))    { need(i); a.work = std::atoi(argv[++i]); }
     else if (!std::strcmp(s,"--critsize")){ need(i); a.critsize = std::atoi(argv[++i]); }
     else if (!std::strcmp(s,"--maxspin")) { need(i); a.maxspin = std::atoi(argv[++i]); }
+    else if (!std::strcmp(s,"--nodes"))   { need(i); a.nodes = std::atoll(argv[++i]); }
+    else if (!std::strcmp(s,"--segs"))    { need(i); a.segs = std::atoi(argv[++i]); }
+    else if (!std::strcmp(s,"--contention")){ need(i); a.contention = std::atoi(argv[++i]); }
     else if (!std::strcmp(s,"-h")||!std::strcmp(s,"--help")) { print_usage(argv[0]); std::exit(0); }
     else { std::fprintf(stderr,"unknown arg: %s\n", s); print_usage(argv[0]); std::exit(2); }
   }

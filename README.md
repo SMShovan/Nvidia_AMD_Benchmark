@@ -177,6 +177,10 @@ is flagged in the figure by the fraction of work abandoned, not just any abandon
 - GEMM: `--dtype fp32|fp16`, `--M --N --K`, `--peak gflops` (optional).
 - spinlock: `--variant naive|leader|atomic`, `--map striped|perwarp|perthread`,
   `--threads T`, `--locks L`, `--work W`, `--critsize C`, `--maxspin S`.
+- spinlock node mode (GNND-scale): `--nodes N`, `--segs S`, `--contention G`.
+  When `--nodes>0`, `L = N*S` and each candidate insert targets a scattered
+  `(node, segment)` lock with `G` wavefronts contending for it (uniform over the
+  whole array). Drives `scripts/run_gnnd_scale.sh`. `--locks` is ignored here.
 - common: `--reps --warmup`, `--check`, `--csv path`.
 
 ## Tuning the tiled kernel

@@ -38,7 +38,13 @@ def main(argv):
     d = d[d["map"] == "striped"].copy()
     d["vendor"] = d["backend"].map(vend)
     locks = int(pd.to_numeric(d["locks"], errors="coerce").max())
-    nodes = locks // 4
+    def col_max(name, default=0):
+        if name not in d.columns: return default
+        v = pd.to_numeric(d[name], errors="coerce").max()
+        return int(v) if pd.notna(v) else default
+    nodes = col_max("nodes"); segs = col_max("segs"); cont = col_max("contention")
+    if nodes <= 0:                       # legacy CSV without node-mode columns
+        nodes, segs = locks // 4, 4
     outdir = os.path.join(a.out, "plots"); os.makedirs(outdir, exist_ok=True)
 
     variants = [v for v in ["leader", "atomic"] if v in d["variant"].unique()]
@@ -63,7 +69,13 @@ def main(argv):
     ax.set_yscale("log")
     ax.set_xticks(x); ax.set_xticklabels([f"{v}\n(lock)" if v=="leader" else f"{v}\n(lock-free)" for v in variants], fontsize=12)
     ax.set_ylabel("throughput (Mops/s, log)"); ax.set_xlabel("")
-    ax.set_title(f"Lock vs lock-free at GNND scale\n{nodes/1e6:.0f}M nodes, {locks/1e6:.0f}M locks (4/node), lightweight increment")
+    # Equal-leaders config: warps-per-lock (the lock contenders) is held equal across vendors,
+    # so report that. (atomic threads/lock then differ by warp width: AMD 2x64, NVIDIA 2x32.)
+    contvals = sorted({int(x) for x in pd.to_numeric(d["contention"], errors="coerce").fillna(0) if x > 0})
+    sub = f"{nodes/1e6:.0f}M nodes, {locks/1e6:.0f}M locks ({segs}/node)"
+    if contvals:
+        sub += f", {contvals[0]} warps/lock" if len(contvals) == 1 else f", {contvals[0]}-{contvals[-1]} warps/lock"
+    ax.set_title(f"Lock vs lock-free at GNND scale\n{sub}, lightweight increment")
     ax.legend(fontsize=12)
     fig.tight_layout(); path = os.path.join(outdir, "gnnd_lock_vs_atomic.png")
     fig.savefig(path, dpi=150, bbox_inches="tight"); plt.close(fig)

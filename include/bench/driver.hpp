@@ -215,19 +215,25 @@ inline int run_matrix_opt(const Args& args) {
 // ----- Spinlock microbenchmark: H100 (ITS, deadlock-free) vs MI300A (lock-step) -----
 inline const char* SPIN_CSV_HEADER =
     "backend,device,variant,map,threads,locks,work,critsize,maxspin,"
-    "kernel_ms,mops_per_s,correct,abandoned";
+    "kernel_ms,mops_per_s,correct,abandoned,nodes,segs,contention";
 
 inline int run_spinlock(const Args& a) {
   const int variant = parse_variant(a.variant);
   const int map = parse_map(a.map);
   const int W = a.work;
+  // Node mode (GNND-scale): L is derived from N nodes x S segments, and each update
+  // targets a scattered (node,segment) lock with G wavefronts sharing it (contention).
+  const bool node_mode = (a.nodes > 0);
+  const int S = (a.segs < 1) ? 1 : a.segs;
+  const int G = (a.contention < 1) ? 1 : a.contention;
   // Round total threads up to a multiple of the block size so every warp/wavefront is
   // full. That makes the leader counting model (adds warpSize per acquired lock) exact
   // on both 32-lane (NVIDIA) and 64-lane (AMD) hardware: (T/warpSize)*warpSize*W = T*W.
   const int tpb = 256;
   long long Teff = ((a.threads + tpb - 1) / tpb) * tpb;
   if (Teff < tpb) Teff = tpb;
-  long long L = a.locks; if (L < 1) L = 1;
+  long long L = node_mode ? (a.nodes * (long long)S) : a.locks;
+  if (L < 1) L = 1;
 
   Buffer<int> lock((std::size_t)L);
   Buffer<u64> counter((std::size_t)L);
@@ -243,18 +249,24 @@ inline int run_spinlock(const Args& a) {
     device_sync();
   };
 
+  auto do_launch = [&]() {
+    if (node_mode)
+      launch_spinlock_node(variant, lock.device(), counter.device(), abandoned.device(),
+                           sink.device(), Teff, W, L, S, G, a.critsize, a.maxspin);
+    else
+      launch_spinlock(variant, lock.device(), counter.device(), abandoned.device(),
+                      sink.device(), Teff, W, L, map, a.critsize, a.maxspin);
+  };
+
   reset();
-  for (int w = 0; w < a.warmup; ++w)
-    launch_spinlock(variant, lock.device(), counter.device(), abandoned.device(),
-                    sink.device(), Teff, W, L, map, a.critsize, a.maxspin);
+  for (int w = 0; w < a.warmup; ++w) do_launch();
   device_sync();
 
   std::vector<double> kt;
   for (int r = 0; r < a.reps; ++r) {
     reset();
     DeviceTimer t; t.start();
-    launch_spinlock(variant, lock.device(), counter.device(), abandoned.device(),
-                    sink.device(), Teff, W, L, map, a.critsize, a.maxspin);
+    do_launch();
     kt.push_back(t.stop_ms());
   }
   double kernel_ms = median(kt);
@@ -271,17 +283,25 @@ inline int run_spinlock(const Args& a) {
   double total_ops = (double)Teff * (double)W;
   double mops = (kernel_ms > 0.0) ? total_ops / (kernel_ms / 1e3) / 1e6 : 0.0;
 
-  std::printf("[spinlock %s/%s] T=%lld L=%lld W=%d crit=%d  kernel %.4f ms  %.1f Mops/s  "
-              "%s  abandoned=%llu  (sum=%llu expected=%llu)\n",
-              a.variant.c_str(), a.map.c_str(), Teff, L, W, a.critsize, kernel_ms, mops,
-              correct ? "[OK]" : "[INCOMPLETE]", (unsigned long long)aband,
-              (unsigned long long)sum, (unsigned long long)expected);
+  if (node_mode)
+    std::printf("[spinlock %s node] T=%lld nodes=%lld segs=%d L=%lld contention=%dwarp W=%d  "
+                "kernel %.4f ms  %.1f Mops/s  %s  abandoned=%llu  (sum=%llu expected=%llu)\n",
+                a.variant.c_str(), Teff, a.nodes, S, L, G, W, kernel_ms, mops,
+                correct ? "[OK]" : "[INCOMPLETE]", (unsigned long long)aband,
+                (unsigned long long)sum, (unsigned long long)expected);
+  else
+    std::printf("[spinlock %s/%s] T=%lld L=%lld W=%d crit=%d  kernel %.4f ms  %.1f Mops/s  "
+                "%s  abandoned=%llu  (sum=%llu expected=%llu)\n",
+                a.variant.c_str(), a.map.c_str(), Teff, L, W, a.critsize, kernel_ms, mops,
+                correct ? "[OK]" : "[INCOMPLETE]", (unsigned long long)aband,
+                (unsigned long long)sum, (unsigned long long)expected);
 
   std::ostringstream row;
   row << BENCH_BACKEND_NAME << "," << device_name() << "," << a.variant << "," << a.map << ","
       << Teff << "," << L << "," << W << "," << a.critsize << "," << a.maxspin << ","
       << kernel_ms << "," << mops << "," << (correct ? "yes" : "no") << ","
-      << (unsigned long long)aband;
+      << (unsigned long long)aband << ","
+      << (node_mode ? a.nodes : 0LL) << "," << (node_mode ? S : 0) << "," << (node_mode ? G : 0);
   append_csv(a.csv, SPIN_CSV_HEADER, row.str());
   // Abandonment is a measured outcome, not a failure: always exit 0 so a sweep can
   // record the deadlock-bail row instead of aborting the run.
