@@ -13,6 +13,7 @@
 #include "bench/config.hpp"
 #include "bench/gemm_matrix.hpp"
 #include "bench/gemm_tiled.hpp"
+#include "bench/gnnd_gemm.hpp"
 #include "bench/gpu_types.hpp"
 #include "bench/kernels_spinlock.hpp"
 #include "bench/kernels_validate.hpp"
@@ -312,6 +313,72 @@ inline int run_spinlock(const Args& a) {
   return 0;
 }
 
+// ----- GNND-style batched tiny GEMM: OLD . NEW^T per point, regular fp32 vs tensor fp16 -----
+inline const char* GNND_GEMM_CSV_HEADER =
+    "backend,device,variant,points,dim,list,kernel_ms,gflops,verified,max_abs";
+
+inline int run_gnnd_gemm(const Args& a) {
+  const long long npts = a.points;
+  const int dim = a.dim, list = a.listsz;
+  const bool tensor = (a.variant == "tensor");
+  if (list != GNND_LIST) {
+    std::fprintf(stderr, "gnnd_gemm built for list=%d (rebuild with -DGNND_LIST=%d)\n", GNND_LIST, list);
+    return 2;
+  }
+  if (dim % GNND_BK) { std::fprintf(stderr, "gnnd_gemm requires dim %% %d == 0\n", GNND_BK); return 2; }
+  if (tensor && (dim % 16)) { std::fprintf(stderr, "tensor path requires dim %% 16 == 0\n"); return 2; }
+  const std::size_t ndata = (std::size_t)npts * dim;
+  const std::size_t nout  = (std::size_t)npts * 2 * list;
+  double gflops = 0.0, kernel_ms = 0.0; const char* verified = "skip"; double max_abs = 0.0;
+
+#if BENCH_DEVICE
+  Buffer<float>  data(ndata);
+  Buffer<half_t> dataH(tensor ? ndata : 1);
+  Buffer<float>  out(nout);
+  launch_gnnd_fill(data.device(), (long long)ndata); device_sync();
+  if (tensor) { launch_gnnd_to_f16(data.device(), dataH.device(), (long long)ndata); device_sync(); }
+  auto go = [&](){ launch_gnnd_gemm(tensor, data.device(), dataH.device(), out.device(), npts, dim, list); };
+  for (int w = 0; w < a.warmup; ++w) go();
+  device_sync();
+  std::vector<double> kt;
+  for (int r = 0; r < a.reps; ++r) { DeviceTimer t; t.start(); go(); kt.push_back(t.stop_ms()); }
+  kernel_ms = median(kt);
+  if (a.check) {
+    data.to_host(); out.to_host();
+    std::vector<float> om, nm; gnnd_reference_point(0, data.host(), npts, dim, list, om, nm);
+    for (int r = 0; r < list; ++r) max_abs = std::max(max_abs, (double)std::fabs(out.host()[r]        - om[r]));
+    for (int c = 0; c < list; ++c) max_abs = std::max(max_abs, (double)std::fabs(out.host()[list + c] - nm[c]));
+    double tol = tensor ? 1.0 : 1e-2;
+    verified = (max_abs <= tol) ? "yes" : "no";
+  }
+#else
+  // CPU reference path (serial; for smoke-testing the harness at small --points).
+  std::vector<float> data(ndata);
+  for (std::size_t i = 0; i < ndata; ++i) data[i] = gnnd_dataval((long long)i);
+  std::vector<float> out(nout);
+  CpuTimer t; t.start();
+  std::vector<float> om, nm;
+  for (long long p = 0; p < npts; ++p) {
+    gnnd_reference_point(p, data.data(), npts, dim, list, om, nm);
+    for (int r = 0; r < list; ++r) out[p*2*list + r]        = om[r];
+    for (int c = 0; c < list; ++c) out[p*2*list + list + c] = nm[c];
+  }
+  kernel_ms = t.stop_ms();
+  verified = a.check ? "yes" : "skip";   // CPU path IS the reference
+#endif
+
+  gflops = 2.0 * (double)npts * (double)list * (double)list * (double)dim / (kernel_ms / 1e3) / 1e9;
+  std::printf("[gnnd_gemm %s] points=%lld dim=%d list=%d  kernel %.3f ms  %.1f GFLOP/s  %s%s\n",
+              tensor ? "tensor(fp16)" : "regular(fp32)", npts, dim, list, kernel_ms, gflops,
+              a.check ? verified : "", (a.check && max_abs > 0) ? "" : "");
+  std::ostringstream row;
+  row << BENCH_BACKEND_NAME << "," << device_name() << "," << (tensor ? "tensor" : "regular") << ","
+      << npts << "," << dim << "," << list << "," << kernel_ms << "," << gflops << ","
+      << verified << "," << max_abs;
+  append_csv(a.csv, GNND_GEMM_CSV_HEADER, row.str());
+  return (a.check && std::string(verified) == "no") ? 1 : 0;
+}
+
 inline int run(int argc, char** argv) {
   Args args = parse_args(argc, argv);
   std::printf("backend=%s  device=%s\n", BENCH_BACKEND_NAME, device_name());
@@ -342,7 +409,8 @@ inline int run(int argc, char** argv) {
 #endif
   }
   if (args.kernel == "spinlock") return run_spinlock(args);
-  std::fprintf(stderr, "unknown --kernel '%s' (have: vadd, tiled, matrix, matrix_opt, spinlock)\n",
+  if (args.kernel == "gnnd_gemm") return run_gnnd_gemm(args);
+  std::fprintf(stderr, "unknown --kernel '%s' (have: vadd, tiled, matrix, matrix_opt, spinlock, gnnd_gemm)\n",
                args.kernel.c_str());
   return 2;
 }

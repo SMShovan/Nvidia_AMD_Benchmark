@@ -172,7 +172,13 @@ is flagged in the figure by the fraction of work abandoned, not just any abandon
 
 ## CLI
 
-`--kernel vadd|tiled|matrix|matrix_opt|spinlock`
+`--kernel vadd|tiled|matrix|matrix_opt|spinlock|gnnd_gemm`
+
+- gnnd_gemm (GNND cross-matching model): `--variant regular|tensor`, `--points N`,
+  `--dim D`, `--list L` (=64). One block per point computes OLD.NEW^T (LxL, K=dim) from
+  scattered on-the-fly neighbor gathers, then reduces to per-OLD and per-NEW minima.
+  Regular = hand-tiled fp32; tensor = fp16-in/fp32-out (WMMA/MFMA). Runs via
+  `scripts/run_gnnd_gemm.sh <gpu>`; plot with `scripts/plot_gnnd_gemm.py`.
 
 - GEMM: `--dtype fp32|fp16`, `--M --N --K`, `--peak gflops` (optional).
 - spinlock: `--variant naive|leader|atomic`, `--map striped|perwarp|perthread`,

@@ -12,7 +12,7 @@ struct Args {
   long long M = 4096, N = 4096, K = 4096;
   DType dtype = DType::f32;
   // --- common ---
-  std::string kernel = "vadd";    // vadd | tiled | matrix | spinlock
+  std::string kernel = "vadd";    // vadd | tiled | matrix | spinlock | gnnd_gemm
   int reps = 20;
   int warmup = 5;
   bool check = false;
@@ -34,12 +34,17 @@ struct Args {
   int contention = 1;             // wavefronts (warps) sharing one lock G (>=1)
   unsigned long long seed = 0;    // node-mode scatter seed (0=deterministic; >0 randomizes)
   int priv = 0;                   // node-mode no-contention: each thread/warp owns its slot
+  // --- gnnd_gemm (batched tiny GEMM, one block per point) ---
+  long long points = 32000000;    // number of points (blocks)
+  int dim = 96;                   // feature-vector length (K)
+  int listsz = 64;                // OLD/NEW list length (must equal GNND_LIST at build time)
 };
 
 inline void print_usage(const char* prog) {
   std::printf(
-      "Usage: %s --kernel vadd|tiled|matrix|spinlock [options]\n"
+      "Usage: %s --kernel vadd|tiled|matrix|spinlock|gnnd_gemm [options]\n"
       "  GEMM:     --M --N --K --dtype fp32|fp16|bf16\n"
+      "  gnnd_gemm: --variant regular|tensor  --points N --dim D --list L (=64)\n"
       "  spinlock: --variant naive|leader|atomic  --map striped|perwarp|perthread\n"
       "            --threads T --locks L --work W --critsize C --maxspin S\n"
       "  spinlock node mode (GNND-scale): --nodes N --segs S --contention G\n"
@@ -75,6 +80,9 @@ inline Args parse_args(int argc, char** argv) {
     else if (!std::strcmp(s,"--contention")){ need(i); a.contention = std::atoi(argv[++i]); }
     else if (!std::strcmp(s,"--seed"))    { need(i); a.seed = std::strtoull(argv[++i], nullptr, 10); }
     else if (!std::strcmp(s,"--private")) { a.priv = 1; }
+    else if (!std::strcmp(s,"--points"))  { need(i); a.points = std::atoll(argv[++i]); }
+    else if (!std::strcmp(s,"--dim"))     { need(i); a.dim = std::atoi(argv[++i]); }
+    else if (!std::strcmp(s,"--list"))    { need(i); a.listsz = std::atoi(argv[++i]); }
     else if (!std::strcmp(s,"-h")||!std::strcmp(s,"--help")) { print_usage(argv[0]); std::exit(0); }
     else { std::fprintf(stderr,"unknown arg: %s\n", s); print_usage(argv[0]); std::exit(2); }
   }
