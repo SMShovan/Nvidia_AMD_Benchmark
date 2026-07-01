@@ -49,7 +49,13 @@ WORK="${WORK:-64}"                          # candidate inserts per thread (cove
 M="${M:-5}"                                 # outer repeats (for avg +/- std)
 REPS="${REPS:-3}"; WARMUP="${WARMUP:-2}"
 MAXSPIN="${MAXSPIN:-100000}"
-VARIANTS="${VARIANTS:-leader atomic}"
+# PRIVATE=1  -> no contention: each thread owns its counter, each warp its lock (lock-vs-
+#               lock-free primitive cost). naive is safe here (no shared locks), so include it.
+# RANDOMIZE=1 -> randomize the scatter per outer repeat (--seed) instead of the fixed hash.
+PRIVATE="${PRIVATE:-0}"
+RANDOMIZE="${RANDOMIZE:-0}"
+if [ "$PRIVATE" = "1" ]; then VARIANTS="${VARIANTS:-naive leader atomic}"; else VARIANTS="${VARIANTS:-leader atomic}"; fi
+TAG=""; [ "$PRIVATE" = "1" ] && TAG="_private"; [ "$RANDOMIZE" = "1" ] && TAG="${TAG}_random"
 LOCKS=$(( NODES * SEGS ))
 
 # Accesses are uniformly scattered over the WHOLE lock array. Coverage of distinct locks
@@ -58,8 +64,8 @@ NUMWARPS=$(( THREADS / WS )); [ "$NUMWARPS" -lt 1 ] && NUMWARPS=1
 HIGH_W=$(( (3 * LOCKS * CONTENTION + NUMWARPS - 1) / NUMWARPS ))
 
 mkdir -p "$OUTDIR/raw_csv" "$OUTDIR/raw_text"
-CSV="$OUTDIR/raw_csv/gnnd_spin_${GPU}.csv"
-TXT="$OUTDIR/raw_text/gnnd_${GPU}_console.txt"
+CSV="$OUTDIR/raw_csv/gnnd_spin_${GPU}${TAG}.csv"
+TXT="$OUTDIR/raw_text/gnnd_${GPU}${TAG}_console.txt"
 : > "$TXT"
 [ -f "$CSV" ] && mv "$CSV" "${CSV%.csv}.$(date +%Y%m%d_%H%M%S).bak.csv"
 
@@ -67,7 +73,11 @@ say(){ echo "[$(date +%H:%M:%S)] $*" | tee -a "$TXT"; }
 run(){ echo "+ $LAUNCH $BIN $*" | tee -a "$TXT"; $LAUNCH "$BIN" "$@" 2>&1 | tee -a "$TXT"; }
 
 say "GNND-scale lock vs lock-free: gpu=$GPU nodes=$NODES segs=$SEGS locks=$LOCKS"
-say "threads=$THREADS  contention=${CONTENTION} warps/lock (leaders/lock; atomic sees $(( CONTENTION * WS )) threads/lock, ws=$WS)  work=$WORK  variants='$VARIANTS'"
+if [ "$PRIVATE" = "1" ]; then
+  say "MODE = no-contention (private): each thread owns its counter, each warp its lock  variants='$VARIANTS'"
+else
+  say "threads=$THREADS  contention=${CONTENTION} warps/lock (leaders/lock; atomic sees $(( CONTENTION * WS )) threads/lock, ws=$WS)  work=$WORK  variants='$VARIANTS'$([ "$RANDOMIZE" = "1" ] && echo '  [random scatter per repeat]')"
+fi
 say "approx device memory: $(( LOCKS * 12 / 1000000000 )) GB   (int lock + u64 counter)"
 say "M=$M reps=$REPS warmup=$WARMUP maxspin=$MAXSPIN  (lightweight increment, --critsize 0)"
 say "default W scatters across all $((LOCKS/1000000))M locks (touches a uniform subset, fast)"
@@ -77,11 +87,13 @@ say "for ~95% lock coverage use WORK=$HIGH_W (heavier, minutes on AMD):  WORK=$H
 run --kernel spinlock --variant atomic --nodes 1024 --segs "$SEGS" --contention "$CONTENTION" \
     --threads 4096 --work 8
 
+EXTRA=""; [ "$PRIVATE" = "1" ] && EXTRA="--private"
 for ((m=1; m<=M; m++)); do
+  SEEDARG=""; [ "$RANDOMIZE" = "1" ] && SEEDARG="--seed $(( (RANDOM * 32768 + RANDOM) * M + m + 1 ))"
   for v in $VARIANTS; do
     run --kernel spinlock --variant "$v" --nodes "$NODES" --segs "$SEGS" \
         --contention "$CONTENTION" --threads "$THREADS" --work "$WORK" --critsize 0 \
-        --reps "$REPS" --warmup "$WARMUP" --maxspin "$MAXSPIN" --csv "$CSV"
+        --reps "$REPS" --warmup "$WARMUP" --maxspin "$MAXSPIN" $EXTRA $SEEDARG --csv "$CSV"
   done
 done
 

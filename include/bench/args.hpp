@@ -32,6 +32,8 @@ struct Args {
   long long nodes = 0;            // graph nodes N (0 => flat --locks mode)
   int segs = 4;                   // lock segments per node S (k/32 in GNND, e.g. 4)
   int contention = 1;             // wavefronts (warps) sharing one lock G (>=1)
+  unsigned long long seed = 0;    // node-mode scatter seed (0=deterministic; >0 randomizes)
+  int priv = 0;                   // node-mode no-contention: each thread/warp owns its slot
 };
 
 inline void print_usage(const char* prog) {
@@ -42,6 +44,7 @@ inline void print_usage(const char* prog) {
       "            --threads T --locks L --work W --critsize C --maxspin S\n"
       "  spinlock node mode (GNND-scale): --nodes N --segs S --contention G\n"
       "            (L = N*S; G wavefronts share each lock; --locks ignored when --nodes>0)\n"
+      "            --seed X (randomize scatter per run; 0=deterministic)  --private (no contention)\n"
       "  common:   --reps --warmup --check --csv path --peak gflops\n", prog);
 }
 
@@ -70,6 +73,8 @@ inline Args parse_args(int argc, char** argv) {
     else if (!std::strcmp(s,"--nodes"))   { need(i); a.nodes = std::atoll(argv[++i]); }
     else if (!std::strcmp(s,"--segs"))    { need(i); a.segs = std::atoi(argv[++i]); }
     else if (!std::strcmp(s,"--contention")){ need(i); a.contention = std::atoi(argv[++i]); }
+    else if (!std::strcmp(s,"--seed"))    { need(i); a.seed = std::strtoull(argv[++i], nullptr, 10); }
+    else if (!std::strcmp(s,"--private")) { a.priv = 1; }
     else if (!std::strcmp(s,"-h")||!std::strcmp(s,"--help")) { print_usage(argv[0]); std::exit(0); }
     else { std::fprintf(stderr,"unknown arg: %s\n", s); print_usage(argv[0]); std::exit(2); }
   }

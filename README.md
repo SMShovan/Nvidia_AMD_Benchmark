@@ -181,6 +181,11 @@ is flagged in the figure by the fraction of work abandoned, not just any abandon
   When `--nodes>0`, `L = N*S` and each candidate insert targets a scattered
   `(node, segment)` lock with `G` wavefronts contending for it (uniform over the
   whole array). Drives `scripts/run_gnnd_scale.sh`. `--locks` is ignored here.
+  - `--private`: no contention. Each thread owns its counter and each warp its
+    lock (collision-free), to isolate pure lock-vs-lock-free per-op cost. Run via
+    `PRIVATE=1 scripts/run_gnnd_scale.sh <gpu>`.
+  - `--seed X`: randomize the scatter per run (0 = deterministic default). Run via
+    `RANDOMIZE=1 scripts/run_gnnd_scale.sh <gpu>`.
 - common: `--reps --warmup`, `--check`, `--csv path`.
 
 ## Tuning the tiled kernel

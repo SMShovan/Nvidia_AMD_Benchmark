@@ -215,7 +215,7 @@ inline int run_matrix_opt(const Args& args) {
 // ----- Spinlock microbenchmark: H100 (ITS, deadlock-free) vs MI300A (lock-step) -----
 inline const char* SPIN_CSV_HEADER =
     "backend,device,variant,map,threads,locks,work,critsize,maxspin,"
-    "kernel_ms,mops_per_s,correct,abandoned,nodes,segs,contention";
+    "kernel_ms,mops_per_s,correct,abandoned,nodes,segs,contention,seed,private";
 
 inline int run_spinlock(const Args& a) {
   const int variant = parse_variant(a.variant);
@@ -252,7 +252,7 @@ inline int run_spinlock(const Args& a) {
   auto do_launch = [&]() {
     if (node_mode)
       launch_spinlock_node(variant, lock.device(), counter.device(), abandoned.device(),
-                           sink.device(), Teff, W, L, S, G, a.critsize, a.maxspin);
+                           sink.device(), Teff, W, L, S, G, a.critsize, a.maxspin, a.seed, a.priv);
     else
       launch_spinlock(variant, lock.device(), counter.device(), abandoned.device(),
                       sink.device(), Teff, W, L, map, a.critsize, a.maxspin);
@@ -284,9 +284,11 @@ inline int run_spinlock(const Args& a) {
   double mops = (kernel_ms > 0.0) ? total_ops / (kernel_ms / 1e3) / 1e6 : 0.0;
 
   if (node_mode)
-    std::printf("[spinlock %s node] T=%lld nodes=%lld segs=%d L=%lld contention=%dwarp W=%d  "
+    std::printf("[spinlock %s node%s] T=%lld nodes=%lld segs=%d L=%lld %s W=%d  "
                 "kernel %.4f ms  %.1f Mops/s  %s  abandoned=%llu  (sum=%llu expected=%llu)\n",
-                a.variant.c_str(), Teff, a.nodes, S, L, G, W, kernel_ms, mops,
+                a.variant.c_str(), a.priv ? "/private" : "", Teff, a.nodes, S, L,
+                a.priv ? "no-contention" : (a.seed ? "contention=2warp,random" : "contention=2warp"),
+                W, kernel_ms, mops,
                 correct ? "[OK]" : "[INCOMPLETE]", (unsigned long long)aband,
                 (unsigned long long)sum, (unsigned long long)expected);
   else
@@ -301,7 +303,9 @@ inline int run_spinlock(const Args& a) {
       << Teff << "," << L << "," << W << "," << a.critsize << "," << a.maxspin << ","
       << kernel_ms << "," << mops << "," << (correct ? "yes" : "no") << ","
       << (unsigned long long)aband << ","
-      << (node_mode ? a.nodes : 0LL) << "," << (node_mode ? S : 0) << "," << (node_mode ? G : 0);
+      << (node_mode ? a.nodes : 0LL) << "," << (node_mode ? S : 0) << ","
+      << (node_mode ? (a.priv ? 0 : G) : 0) << "," << (node_mode ? a.seed : 0ULL) << ","
+      << (node_mode ? a.priv : 0);
   append_csv(a.csv, SPIN_CSV_HEADER, row.str());
   // Abandonment is a measured outcome, not a failure: always exit 0 so a sweep can
   // record the deadlock-bail row instead of aborting the run.
